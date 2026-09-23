@@ -1,13 +1,26 @@
 <template>
   <div class="dashboard-container">
-    <el-row :gutter="20" class="mb-20">
+    <div class="dashboard-toolbar mb-20">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="本页指标与「运营简报」共用同一统计口径；如需按时间范围生成可分享简报，请前往运营简报。"
+      >
+        <el-button type="primary" size="small" @click="goBriefing">
+          <el-icon><Notification /></el-icon>前往运营简报
+        </el-button>
+      </el-alert>
+    </div>
+
+    <el-row :gutter="20" class="mb-20" v-loading="loading">
       <el-col :span="6">
         <div class="stat-card">
           <div class="stat-icon well">
             <el-icon><Position /></el-icon>
           </div>
           <div class="stat-content">
-            <div class="stat-value">{{ statistics.wellCount || 0 }}</div>
+            <div class="stat-value">{{ display.wellCount }}</div>
             <div class="stat-label">总井数</div>
           </div>
         </div>
@@ -18,7 +31,7 @@
             <el-icon><Monitor /></el-icon>
           </div>
           <div class="stat-content">
-            <div class="stat-value">{{ statistics.drillingCount || 0 }}</div>
+            <div class="stat-value">{{ display.drillingCount }}</div>
             <div class="stat-label">钻井中</div>
           </div>
         </div>
@@ -29,7 +42,7 @@
             <el-icon><TrendCharts /></el-icon>
           </div>
           <div class="stat-content">
-            <div class="stat-value">{{ statistics.productionCount || 0 }}</div>
+            <div class="stat-value">{{ display.productionCount }}</div>
             <div class="stat-label">生产中</div>
           </div>
         </div>
@@ -40,7 +53,7 @@
             <el-icon><Warning /></el-icon>
           </div>
           <div class="stat-content">
-            <div class="stat-value">{{ statistics.alarmCount || 0 }}</div>
+            <div class="stat-value">{{ display.alarmCount }}</div>
             <div class="stat-label">告警数量</div>
           </div>
         </div>
@@ -52,10 +65,17 @@
         <el-card class="chart-card">
           <template #header>
             <div class="card-header">
-              <span>产量趋势</span>
+              <span>产量趋势（月度总量，与运营简报同一产量数据源）</span>
+              <el-tag v-if="degraded" size="small" type="warning" effect="plain">实时接口不可用，显示本地数据</el-tag>
             </div>
           </template>
-          <div ref="productionTrendChart" class="chart-container"></div>
+          <div v-if="hasError" class="chart-error">
+            <el-icon class="error-icon"><CircleCloseFilled /></el-icon>
+            <div class="error-title">产量数据暂不可用</div>
+            <div class="error-msg">{{ errorMessage }}</div>
+            <el-button size="small" type="primary" plain @click="loadData">重试</el-button>
+          </div>
+          <div v-show="!hasError" ref="productionTrendChart" class="chart-container"></div>
         </el-card>
       </el-col>
       <el-col :span="8">
@@ -85,8 +105,8 @@
         <el-card class="list-card">
           <template #header>
             <div class="card-header">
-              <span>实时告警</span>
-              <el-button type="primary" size="small">查看全部</el-button>
+              <span>实时告警（未处理）</span>
+              <el-button type="primary" size="small" @click="goBriefing">查看全部</el-button>
             </div>
           </template>
           <el-table :data="alarmList" style="width: 100%">
@@ -106,94 +126,94 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import mapboxgl from 'mapbox-gl'
 import 'mapbox-gl/dist/mapbox-gl.css'
+import {
+  getDashboardSnapshot,
+  type DashboardBundle
+} from '@/services/briefingService'
+import {
+  buildProductionTrendOption,
+  buildWellStatusOption
+} from '@/utils/chartOptions'
 
-const statistics = ref({
-  wellCount: 156,
-  drillingCount: 12,
-  productionCount: 89,
-  alarmCount: 5
+const router = useRouter()
+const goBriefing = () => router.push('/briefing')
+
+const loading = ref(true)
+const hasError = ref(false)
+const errorMessage = ref('')
+const degraded = ref(false)
+const snapshot = ref<DashboardBundle | null>(null)
+
+// 数据缺失时卡片展示占位而不是误导性的 0
+const display = computed(() => {
+  if (snapshot.value) return snapshot.value.overview
+  return { wellCount: '--', drillingCount: '--', productionCount: '--', alarmCount: '--' }
 })
 
-const alarmList = ref([
-  { wellName: 'A-01井', alarmType: '钻压异常', level: '严重', time: '2024-01-15 10:30' },
-  { wellName: 'B-03井', alarmType: '温度超标', level: '警告', time: '2024-01-15 10:25' },
-  { wellName: 'C-02井', alarmType: '设备故障', level: '严重', time: '2024-01-15 10:15' },
-  { wellName: 'D-05井', alarmType: '产量偏低', level: '提示', time: '2024-01-15 10:00' },
-  { wellName: 'E-01井', alarmType: '环保指标', level: '警告', time: '2024-01-15 09:45' }
-])
+const alarmList = computed(() => snapshot.value?.overview.openAlarms.slice(0, 5) || [])
 
 const productionTrendChart = ref<HTMLElement>()
 const wellStatusChart = ref<HTMLElement>()
 const mapContainer = ref<HTMLElement>()
 
+let trendChart: echarts.ECharts | null = null
+let statusChart: echarts.ECharts | null = null
+
 const getAlarmType = (level: string) => {
-  const map: Record<string, any> = {
-    '严重': 'danger',
-    '警告': 'warning',
-    '提示': 'info'
+  const map: Record<string, 'danger' | 'warning' | 'info'> = {
+    严重: 'danger',
+    警告: 'warning',
+    提示: 'info'
   }
   return map[level] || 'info'
 }
 
-const initProductionTrendChart = () => {
-  if (!productionTrendChart.value) return
-  const chart = echarts.init(productionTrendChart.value)
-  chart.setOption({
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['日产油量', '日产水量'] },
-    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
-    xAxis: {
-      type: 'category',
-      boundaryGap: false,
-      data: ['1月', '2月', '3月', '4月', '5月', '6月', '7月']
+function renderTrend() {
+  if (!productionTrendChart.value || !snapshot.value) return
+  trendChart = trendChart || echarts.init(productionTrendChart.value)
+  const monthly = snapshot.value.monthly
+  // 复用简报的双线趋势配置，仅把横轴由日改为月，确保口径 / 配色一致
+  trendChart.setOption(
+    {
+      ...buildProductionTrendOption(
+        monthly.map((m) => ({ date: m.month, oil: m.oil, water: m.water }))
+      )
     },
-    yAxis: { type: 'value' },
-    series: [
-      {
-        name: '日产油量',
-        type: 'line',
-        smooth: true,
-        data: [120, 132, 101, 134, 90, 230, 210],
-        itemStyle: { color: '#3b82f6' }
-      },
-      {
-        name: '日产水量',
-        type: 'line',
-        smooth: true,
-        data: [220, 182, 191, 234, 290, 330, 310],
-        itemStyle: { color: '#06b6d4' }
-      }
-    ]
-  })
-  window.addEventListener('resize', () => chart.resize())
+    true
+  )
 }
 
-const initWellStatusChart = () => {
-  if (!wellStatusChart.value) return
-  const chart = echarts.init(wellStatusChart.value)
-  chart.setOption({
-    tooltip: { trigger: 'item' },
-    legend: { orient: 'vertical', left: 'left' },
-    series: [
-      {
-        name: '井状态',
-        type: 'pie',
-        radius: '60%',
-        data: [
-          { value: 89, name: '生产中', itemStyle: { color: '#22c55e' } },
-          { value: 12, name: '钻井中', itemStyle: { color: '#3b82f6' } },
-          { value: 35, name: '待修井', itemStyle: { color: '#f59e0b' } },
-          { value: 20, name: '关停井', itemStyle: { color: '#ef4444' } }
-        ],
-        emphasis: { itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.5)' } }
-      }
-    ]
-  })
-  window.addEventListener('resize', () => chart.resize())
+function renderStatus() {
+  if (!wellStatusChart.value || !snapshot.value) return
+  statusChart = statusChart || echarts.init(wellStatusChart.value)
+  statusChart.setOption(buildWellStatusOption(snapshot.value.overview.statusDistribution), true)
+}
+
+const resizeCharts = () => {
+  trendChart?.resize()
+  statusChart?.resize()
+}
+
+async function loadData() {
+  loading.value = true
+  hasError.value = false
+  try {
+    const result = await getDashboardSnapshot()
+    snapshot.value = result.data
+    degraded.value = !!result.degraded
+    renderTrend()
+    renderStatus()
+  } catch (err) {
+    hasError.value = true
+    errorMessage.value = err instanceof Error ? err.message : '数据加载失败'
+  } finally {
+    loading.value = false
+  }
 }
 
 const initMap = () => {
@@ -206,7 +226,7 @@ const initMap = () => {
       center: [118.8, 38.5],
       zoom: 6
     })
-    
+
     map.on('load', () => {
       const wells = [
         { lng: 118.5, lat: 38.2, name: 'A-01井', status: 'production' },
@@ -214,17 +234,18 @@ const initMap = () => {
         { lng: 119.1, lat: 38.3, name: 'C-02井', status: 'production' },
         { lng: 118.6, lat: 38.7, name: 'D-05井', status: 'maintenance' }
       ]
-      
-      wells.forEach(well => {
+
+      wells.forEach((well) => {
         const el = document.createElement('div')
         el.className = 'well-marker'
-        el.style.backgroundColor = well.status === 'production' ? '#22c55e' : well.status === 'drilling' ? '#3b82f6' : '#f59e0b'
+        el.style.backgroundColor =
+          well.status === 'production' ? '#22c55e' : well.status === 'drilling' ? '#3b82f6' : '#f59e0b'
         el.style.width = '16px'
         el.style.height = '16px'
         el.style.borderRadius = '50%'
         el.style.border = '2px solid #fff'
         el.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)'
-        
+
         new mapboxgl.Marker(el)
           .setLngLat([well.lng, well.lat])
           .setPopup(new mapboxgl.Popup({ offset: 25 }).setHTML(`<h4>${well.name}</h4><p>状态: ${well.status}</p>`))
@@ -237,15 +258,30 @@ const initMap = () => {
 }
 
 onMounted(() => {
-  initProductionTrendChart()
-  initWellStatusChart()
+  loadData()
   initMap()
+  window.addEventListener('resize', resizeCharts)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', resizeCharts)
+  trendChart?.dispose()
+  statusChart?.dispose()
 })
 </script>
 
 <style scoped lang="scss">
 .dashboard-container {
   width: 100%;
+}
+
+.dashboard-toolbar {
+  :deep(.el-alert__content) {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
 }
 
 .stat-card {
@@ -267,7 +303,7 @@ onMounted(() => {
   justify-content: center;
   font-size: 28px;
   color: #fff;
-  
+
   &.well { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
   &.drilling { background: linear-gradient(135deg, #8b5cf6, #6d28d9); }
   &.production { background: linear-gradient(135deg, #22c55e, #16a34a); }
@@ -276,7 +312,7 @@ onMounted(() => {
 
 .stat-content {
   flex: 1;
-  
+
   .stat-value {
     font-size: 28px;
     font-weight: 600;
@@ -284,7 +320,7 @@ onMounted(() => {
     line-height: 1;
     margin-bottom: 6px;
   }
-  
+
   .stat-label {
     font-size: 14px;
     color: #64748b;
@@ -308,6 +344,30 @@ onMounted(() => {
 .chart-container {
   width: 100%;
   height: 300px;
+}
+
+.chart-error {
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  .error-icon {
+    font-size: 28px;
+    color: #ef4444;
+  }
+
+  .error-title {
+    font-size: 14px;
+    color: #475569;
+  }
+
+  .error-msg {
+    font-size: 12px;
+    color: #94a3b8;
+  }
 }
 
 .map-container {

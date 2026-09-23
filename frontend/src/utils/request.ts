@@ -1,6 +1,13 @@
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios'
+import axios, { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/store/modules/user'
+
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 为 true 时拦截器不弹全局错误提示，由调用方自行降级处理 */
+    skipErrorToast?: boolean
+  }
+}
 
 const service: AxiosInstance = axios.create({
   baseURL: '/api',
@@ -8,10 +15,10 @@ const service: AxiosInstance = axios.create({
 })
 
 service.interceptors.request.use(
-  (config: AxiosRequestConfig) => {
+  (config: InternalAxiosRequestConfig) => {
     const userStore = useUserStore()
-    if (userStore.token && config.headers) {
-      config.headers['Authorization'] = `Bearer ${userStore.token}`
+    if (userStore.token) {
+      config.headers.Authorization = `Bearer ${userStore.token}`
     }
     return config
   },
@@ -24,11 +31,13 @@ service.interceptors.response.use(
   (response: AxiosResponse) => {
     const res = response.data
     if (res.code !== 200) {
-      ElMessage({
-        message: res.message || 'Error',
-        type: 'error',
-        duration: 5 * 1000
-      })
+      if (!response.config?.skipErrorToast) {
+        ElMessage({
+          message: res.message || 'Error',
+          type: 'error',
+          duration: 5 * 1000
+        })
+      }
 
       if (res.code === 401) {
         ElMessageBox.confirm('登录状态已过期，请重新登录', '系统提示', {
@@ -47,11 +56,14 @@ service.interceptors.response.use(
     }
   },
   (error) => {
-    ElMessage({
-      message: error.message,
-      type: 'error',
-      duration: 5 * 1000
-    })
+    // skipErrorToast：由调用方自行处理错误（如运营简报各分区独立降级）
+    if (!error.config?.skipErrorToast) {
+      ElMessage({
+        message: error.message,
+        type: 'error',
+        duration: 5 * 1000
+      })
+    }
     return Promise.reject(error)
   }
 )

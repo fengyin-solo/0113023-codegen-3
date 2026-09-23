@@ -20,6 +20,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '综合驾驶舱', icon: 'DataAnalysis' }
       },
       {
+        path: 'briefing',
+        name: 'Briefing',
+        component: () => import('@/views/briefing/index.vue'),
+        meta: { title: '运营简报', icon: 'Notebook' }
+      },
+      {
         path: 'well',
         name: 'Well',
         component: () => import('@/views/well/index.vue'),
@@ -96,7 +102,7 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, _from, next) => {
   const userStore = useUserStore()
   const token = userStore.token
   

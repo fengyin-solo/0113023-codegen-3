@@ -174,10 +174,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import * as echarts from 'echarts'
-import { getWellList } from '@/api/well'
-import { getWellLifecycle } from '@/api/lifecycle'
 
 interface Well {
   id: number

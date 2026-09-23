@@ -17,16 +17,16 @@
           <template v-for="item in menuList" :key="item.path">
             <el-sub-menu v-if="item.children && item.children.length > 0" :index="item.path">
               <template #title>
-                <el-icon><component :is="item.meta.icon" /></el-icon>
-                <span>{{ item.meta.title }}</span>
+                <el-icon><component :is="item.meta?.icon" /></el-icon>
+                <span>{{ item.meta?.title }}</span>
               </template>
               <el-menu-item v-for="child in item.children" :key="child.path" :index="`${item.path}/${child.path}`">
-                {{ child.meta.title }}
+                {{ child.meta?.title }}
               </el-menu-item>
             </el-sub-menu>
             <el-menu-item v-else :index="item.path">
-              <el-icon><component :is="item.meta.icon" /></el-icon>
-              <template #title>{{ item.meta.title }}</template>
+              <el-icon><component :is="item.meta?.icon" /></el-icon>
+              <template #title>{{ item.meta?.title }}</template>
             </el-menu-item>
           </template>
         </el-menu>
